@@ -12,11 +12,11 @@ ENV DEBIAN_FRONTEND noninteractive
 ENV TERM linux
 
 # Airflow
-ARG AIRFLOW_VERSION=1.10.9
+ARG AIRFLOW_VERSION=2.3.3
 ARG AIRFLOW_USER_HOME=/usr/local/airflow
-ARG AIRFLOW_DEPS=""
+ARG AIRFLOW_DEPS="apache-airflow-providers-databricks,apache-airflow-providers-microsoft-azure,apache-airflow-providers-docker"
 ARG PYTHON_DEPS=""
-ENV AIRFLOW_HOME=${AIRFLOW_USER_HOME}
+ENV AIRFLOW_HOME=/usr/local/airflow
 
 # Define en_US.
 ENV LANGUAGE en_US.UTF-8
@@ -27,6 +27,7 @@ ENV LC_MESSAGES en_US.UTF-8
 
 # Disable noisy "Handling signal" log messages:
 # ENV GUNICORN_CMD_ARGS --log-level WARNING
+# USER root
 
 RUN set -ex \
     && buildDeps=' \
@@ -50,10 +51,12 @@ RUN set -ex \
         rsync \
         netcat \
         locales \
+        dos2unix \
+        openssh-server \
     && sed -i 's/^# en_US.UTF-8 UTF-8$/en_US.UTF-8 UTF-8/g' /etc/locale.gen \
     && locale-gen \
     && update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
-    && useradd -ms /bin/bash -d ${AIRFLOW_USER_HOME} airflow \
+    # && useradd -ms /bin/bash -d ${AIRFLOW_USER_HOME} airflow \
     && pip install -U pip setuptools wheel \
     && pip install pytz \
     && pip install pyOpenSSL \
@@ -64,6 +67,8 @@ RUN set -ex \
     && if [ -n "${PYTHON_DEPS}" ]; then pip install ${PYTHON_DEPS}; fi \
     && apt-get purge --auto-remove -yqq $buildDeps \
     && apt-get autoremove -yqq --purge \
+    && echo "root:Docker!" | chpasswd  \
+
     && apt-get clean \
     && rm -rf \
         /var/lib/apt/lists/* \
@@ -73,14 +78,34 @@ RUN set -ex \
         /usr/share/doc \
         /usr/share/doc-base
 
+
 COPY script/entrypoint.sh /entrypoint.sh
+RUN dos2unix /entrypoint.sh
 COPY config/airflow.cfg ${AIRFLOW_USER_HOME}/airflow.cfg
 
-RUN chown -R airflow: ${AIRFLOW_USER_HOME}
+# SSH support in custom linux containers
+# https://docs.microsoft.com/en-us/azure/app-service/configure-custom-container?pivots=container-linux#enable-ssh
+# Install OpenSSH and set the password for root to "Docker!". In this example, "apk add" is the install instruction for an Alpine Linux-based image.
 
-EXPOSE 8080 5555 8793
+# Copy the sshd_config file to the /etc/ssh/ directory
+COPY config/sshd_config /etc/ssh/
+RUN dos2unix /etc/ssh/sshd_config
 
-USER airflow
+# Copy and configure the ssh_setup file
+RUN mkdir -p /tmp
+COPY script/ssh_setup.sh /tmp
+RUN dos2unix /tmp/ssh_setup.sh
+RUN chmod +x /tmp/ssh_setup.sh \
+    && (sleep 1;/tmp/ssh_setup.sh 2>&1 > /dev/null)
+
+# Open port 2222 for SSH access
+# RUN chown -R airflow: ${AIRFLOW_USER_HOME}
+
+RUN service ssh start
+
+EXPOSE 8080 2222 5555 8793
+
+# USER airflow
 WORKDIR ${AIRFLOW_USER_HOME}
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["webserver"]
